@@ -10,7 +10,7 @@ import os
 
 # Constants
 EMBEDDINGS_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
-LLM_MODEL_PATH = "models/llama-2-7b-chat.ggmlv3.q4_0.bin"
+LLM_MODEL_PATH = "models/llama-2-7b-chat.ggmlv3.q5_0.bin"
 CHAT_HISTORY_LIMIT = 5 
 ROWS_PER_PAGE = 10
 
@@ -48,8 +48,15 @@ def run_conversation(qa, chat_history, query):
     # Keep only the last few exchanges for performance
     if len(chat_history) > CHAT_HISTORY_LIMIT:
         chat_history = chat_history[-CHAT_HISTORY_LIMIT:]
-        
-    result = qa({"question": query + " according to the provided data", "chat_history": chat_history})
+    
+    # Enhanced prompt with context and instructions
+    enhanced_query = (
+        f"You are a data analyst. Based on the provided CSV data, answer the following question: {query}. "
+        "Please ensure your answer is accurate and directly derived from the data. "
+        "If the data does not provide enough information, please state that explicitly."
+    )
+    
+    result = qa({"question": enhanced_query, "chat_history": chat_history})
     chat_history.append((query, result['answer']))  # Update chat history
     return result['answer'], chat_history
 
