@@ -1,103 +1,91 @@
 import streamlit as st
-import pandas as pd
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_community.llms import CTransformers
-from langchain.chains import ConversationalRetrievalChain
-from langchain.schema import Document
-import os
+from config import EMBEDDINGS_MODELS, LLM_MODELS, SUPPORTED_FILE_TYPES, ROWS_PER_PAGE
+from utils.file_loader import load_file
+from utils.text_processor import split_pdf_text_into_chunks, split_structured_data_into_chunks
+from models.embeddings import create_embeddings
+from models.llm import initialize_llm, create_conversational_chain
+from utils.chat_history import update_chat_history
+from utils.relevance_checker import is_relevant_query
+from utils.token_utils import count_tokens, truncate_text_by_tokens
 
-# Constants
-EMBEDDINGS_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
-LLM_MODEL_PATH = "models/llama-2-7b-chat.ggmlv3.q5_0.bin"
-CHAT_HISTORY_LIMIT = 5 
-ROWS_PER_PAGE = 10
+def main():
+    st.title("Data Query System")
+    st.write("This app allows you to query data extracted from various file formats.")
 
-# 1. Load CSV Data
-def load_csv_data(file):
-    data = pd.read_csv(file)
-    return data
+    # Select file type
+    file_type = st.selectbox("Select file type", SUPPORTED_FILE_TYPES)
+    uploaded_file = st.file_uploader(f"Upload a {file_type.upper()} file", type=[file_type])
 
-# 2. Split Data into Chunks
-def split_text_into_chunks(data, chunk_size=500, chunk_overlap=20):
-    documents = []
-    for _, row in data.iterrows():
-        text = ' '.join(row.astype(str).values)
-        document = Document(page_content=text)
-        documents.append(document)
+    if uploaded_file is not None:
+        if file_type in ["csv", "json", "xlsx"]:
+            # Load structured data
+            data = load_file(uploaded_file, file_type)
+            st.write(f"Data loaded from {uploaded_file.name}, containing {len(data)} rows.")
+            
+            # Pagination setup for tabular data
+            total_pages = len(data) // ROWS_PER_PAGE + (1 if len(data) % ROWS_PER_PAGE != 0 else 0)
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
+            start_row = (page - 1) * ROWS_PER_PAGE
+            end_row = start_row + ROWS_PER_PAGE
+            st.dataframe(data.iloc[start_row:end_row])
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    text_chunks = text_splitter.split_documents(documents)
+            # Process structured data
+            text_chunks = split_structured_data_into_chunks(data)
+
+        elif file_type == "pdf":
+            # Load raw text from PDF
+            raw_text = load_file(uploaded_file, file_type)
+            st.write(f"Data loaded from {uploaded_file.name}.")
+            st.text_area("Extracted Text", value=raw_text, height=300)
+
+            # Process raw text from PDF
+            text_chunks = split_pdf_text_into_chunks(raw_text)
+
+        st.write(f"Data split into {len(text_chunks)} chunks.")
+
+        # Select embedding model
+        embedding_model = st.selectbox("Select embedding model", list(EMBEDDINGS_MODELS.keys()))
+        docsearch = create_embeddings(text_chunks, EMBEDDINGS_MODELS[embedding_model])
+
+        # Select LLM model
+        llm_model = st.selectbox("Select LLM model", list(LLM_MODELS.keys()))
+        llm, tokenizer = initialize_llm(LLM_MODELS[llm_model])
+        qa = create_conversational_chain(llm, docsearch)
+
+        # Chat interaction
+        chat_history = []
+        query = st.text_input("Ask a question based on the data:", "")
+        if st.button("Submit") and query:
+            answer, chat_history = run_conversation(qa, llm, chat_history, query, docsearch, tokenizer=tokenizer)
+            st.write("Answer:", answer)
+
+def run_conversation(qa, llm, chat_history, query, docsearch, tokenizer, max_tokens=512):
+    # Check if the query exceeds the maximum token limit
+    query_token_count = count_tokens(query, tokenizer)
+    if query_token_count > max_tokens:
+        st.warning(f"Query is too long ({query_token_count} tokens). Truncating to {max_tokens} tokens.")
+        query = truncate_text_by_tokens(query, tokenizer, max_tokens)
+
+    # Check if the query is relevant to the document
+    flag, score, doc = is_relevant_query(query, docsearch)
+    if not flag:
+        # If not relevant, directly use LLM to generate a response
+        print("Score: ", score)
+        print("Document: ", doc)
+        result = llm(query)
+        answer = result.strip()
+        chat_history = update_chat_history(chat_history, query, answer)
+        return answer, chat_history
     
-    return text_chunks
-
-# 3. Create Embeddings
-def create_embeddings(text_chunks, model_name=EMBEDDINGS_MODEL_NAME):
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
-    return FAISS.from_documents(text_chunks, embeddings)
-
-# 5. Initialize Conversational Chain
-def create_conversational_chain(docsearch):
-    llm = CTransformers(model=LLM_MODEL_PATH, model_type="llama", max_new_tokens=512, temperature=0.1)
-    qa = ConversationalRetrievalChain.from_llm(llm, retriever=docsearch.as_retriever())
-    return qa
-
-# 6. Handle User Interaction and Query Processing
-def run_conversation(qa, chat_history, query):
-    # Keep only the last few exchanges for performance
-    if len(chat_history) > CHAT_HISTORY_LIMIT:
-        chat_history = chat_history[-CHAT_HISTORY_LIMIT:]
-    
-    # Enhanced prompt with context and instructions
+    # If relevant, proceed with the conversational retrieval chain
     enhanced_query = (
-        f"You are a data analyst. Based on the provided CSV data, answer the following question: {query}. "
+        f"You are a data analyst. Based on the provided data, answer the following question: {query}. "
         "Please ensure your answer is accurate and directly derived from the data. "
         "If the data does not provide enough information, please state that explicitly."
     )
-    
     result = qa({"question": enhanced_query, "chat_history": chat_history})
-    chat_history.append((query, result['answer']))  # Update chat history
+    chat_history = update_chat_history(chat_history, query, result['answer'])
     return result['answer'], chat_history
-
-# Main function to tie everything together
-def main():
-    st.title("CSV Data Query System")
-    st.write("This app allows you to query data extracted from the CSV file.")
-
-    csv_file = st.file_uploader("Upload a CSV file", type=["csv"])
-    
-    if csv_file is not None:
-        data = load_csv_data(csv_file)
-        st.write(f"Data loaded from {csv_file.name}, containing {len(data)} rows.")
-
-        # Pagination setup for data display
-        total_pages = len(data) // ROWS_PER_PAGE + (1 if len(data) % ROWS_PER_PAGE != 0 else 0)
-        page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, step=1)
-
-        # Calculate the start and end rows for the current page
-        start_row = (page - 1) * ROWS_PER_PAGE
-        end_row = start_row + ROWS_PER_PAGE
-        st.dataframe(data.iloc[start_row:end_row])
-
-        text_chunks = split_text_into_chunks(data)
-        st.write(f"Data split into {len(text_chunks)} chunks.")
-
-        docsearch = create_embeddings(text_chunks)
-
-        qa = create_conversational_chain(docsearch)
-
-        chat_history = []
-
-        query = st.text_input("Ask a question based on the data:", "")
-
-        if st.button("Submit") and query:
-            answer, chat_history = run_conversation(qa, chat_history, query)
-            st.write("Answer:", answer) 
-            print("Answer:", answer)
-
-    else:
-        st.write("Please upload a CSV file to begin.")
 
 if __name__ == "__main__":
     main()
