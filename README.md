@@ -10,6 +10,10 @@ DocuminChat is an advanced application that allows you to upload and query data 
 - **Conversational AI**: Use advanced conversational AI models to answer questions based on the uploaded data.
 - **Paginated Data View**: View data in a paginated format for better readability and navigation.
 
+## Diagram
+
+![Image](https://github.com/user-attachments/assets/8d56a16a-f599-4d9d-b92a-f0a61ca87342)
+
 ## Installation
 
 ### 1. Clone the repository or download the code.
